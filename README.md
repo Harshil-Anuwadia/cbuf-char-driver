@@ -4,6 +4,66 @@ Linux character device driver providing circular buffer FIFOs under `/dev/cbuf0`
 
 Data written to a device is held in a kernel circular buffer and can be read back sequentially. Reading from an empty buffer blocks until data is available, and writing to a full buffer blocks until space is freed. Non-blocking I/O (`O_NONBLOCK`) and multiplexing (`poll`/`epoll`/`select`) are also supported.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph USER_SPACE["User Space"]
+        App1["Applications & Shell Utilities<br/>(cat, echo, test programs)"]
+        PollApp["Event Multiplexing<br/>(epoll / poll / select)"]
+        SysApp["Monitoring Tools<br/>(sysfs readers)"]
+    end
+
+    subgraph BOUNDARY["Linux Kernel Boundary & VFS"]
+        DevNodes["/dev/cbuf0 ... /dev/cbufN"]
+        SysfsNode["/sys/class/cbuf/cbufX/"]
+    end
+
+    subgraph KERNEL_SPACE["Kernel Space: cbuf Driver (cbuf.ko)"]
+        subgraph FOPS["struct file_operations"]
+            Read["cbuf_read()"]
+            Write["cbuf_write()"]
+            Poll["cbuf_poll()"]
+            Ioctl["cbuf_ioctl()"]
+            Fasync["cbuf_fasync()"]
+        end
+
+        subgraph SYNC["Synchronization & Scheduling"]
+            Lock["struct mutex lock"]
+            RdWait["rd_wait (Wait Queue)"]
+            WrWait["wr_wait (Wait Queue)"]
+            SigQueue["fasync_struct (SIGIO)"]
+        end
+
+        subgraph BUFFER["Per-Device Circular Buffer"]
+            Head["Head Pointer (Write index)"]
+            Tail["Tail Pointer (Read index)"]
+            Mem["kvzalloc Memory Array<br/>(64 B to 1 MB)"]
+        end
+
+        subgraph SYSFS["Sysfs Diagnostics"]
+            Attrs["occupancy | buf_size<br/>total_read | total_written"]
+        end
+    end
+
+    App1 -->|read / write / ioctl| DevNodes
+    PollApp -->|epoll_wait / poll| DevNodes
+    SysApp -->|read attributes| SysfsNode
+
+    DevNodes --> FOPS
+    SysfsNode --> SYSFS
+
+    Read <-->|copy_to_user / blocks| RdWait
+    Write <-->|copy_from_user / blocks| WrWait
+    Poll --> RdWait
+    Poll --> WrWait
+    Fasync --> SigQueue
+
+    FOPS <--> Lock
+    Lock <--> BUFFER
+    SYSFS -.->|reads stats| BUFFER
+```
+
 ## Build
 
 Requirements: kernel headers (`linux-headers` or `kernel-devel`) and gcc.
